@@ -96,7 +96,7 @@ impl Solver {
         }
         for (i, lit) in c.iter().copied().enumerate().skip(2) {
             if val(lit) != Some(false) {
-                c.swap(0, i);
+                c.swap(1, i);
                 return Ok(Some(!lit));
             }
         }
