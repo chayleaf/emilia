@@ -11,7 +11,7 @@ type Var = usize;
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Lit {
     var: Var,
-    pos: bool,
+    val: bool,
 }
 
 impl fmt::Debug for Lit {
@@ -19,7 +19,7 @@ impl fmt::Debug for Lit {
         write!(
             f,
             "{}",
-            if self.pos {
+            if self.val {
                 self.var as isize
             } else {
                 -(self.var as isize)
@@ -31,7 +31,7 @@ impl fmt::Debug for Lit {
 impl Not for Lit {
     type Output = Self;
     fn not(mut self) -> Self::Output {
-        self.pos = !self.pos;
+        self.val = !self.val;
         self
     }
 }
@@ -77,16 +77,16 @@ impl Solver {
                 return Ok(());
             }
         }
-        self.vars[clause[0].var].watchers[usize::from(!clause[0].pos)].push(self.clauses.len());
-        self.vars[clause[1].var].watchers[usize::from(!clause[1].pos)].push(self.clauses.len());
+        self.vars[clause[0].var].watchers[usize::from(!clause[0].val)].push(self.clauses.len());
+        self.vars[clause[1].var].watchers[usize::from(!clause[1].val)].push(self.clauses.len());
         self.clauses.push(clause);
         Ok(())
     }
     fn val(&self, lit: Lit) -> Option<bool> {
-        self.vars[lit.var].value.map(|x| x == lit.pos)
+        self.vars[lit.var].value.map(|x| x == lit.val)
     }
     fn visit(&mut self, clause: usize, from: Lit) -> Result<Option<Lit>, Unsat> {
-        let val = |lit: Lit| self.vars[lit.var].value.map(|x| x == lit.pos);
+        let val = |lit: Lit| self.vars[lit.var].value.map(|x| x == lit.val);
         let c = &mut self.clauses[clause];
         if !c[0] == from {
             c.swap(0, 1);
@@ -115,27 +115,27 @@ impl Solver {
     }
     fn enqueue_unchecked(&mut self, lit: Lit) {
         debug_assert!(self.val(lit).is_none());
-        self.vars[lit.var].value = Some(lit.pos);
+        self.vars[lit.var].value = Some(lit.val);
         self.prop_q.push_back(lit.var);
         self.history.push(lit.var);
     }
     fn propagate(&mut self) -> Result<(), Unsat> {
         while let Some(var) = self.prop_q.pop_front() {
-            let pos = self.vars[var].value.unwrap();
+            let val = self.vars[var].value.unwrap();
             let mut watchers = Vec::new();
             std::mem::swap(
                 &mut watchers,
-                &mut self.vars[var].watchers[usize::from(pos)],
+                &mut self.vars[var].watchers[usize::from(val)],
             );
             let mut i = 0;
             while i < watchers.len() {
                 if let Some(reassign) =
-                    self.visit(watchers[i], Lit { var, pos }).map_err(|err| {
+                    self.visit(watchers[i], Lit { var, val }).map_err(|err| {
                         self.prop_q.clear();
                         err
                     })?
                 {
-                    self.vars[reassign.var].watchers[usize::from(reassign.pos)].push(watchers[i]);
+                    self.vars[reassign.var].watchers[usize::from(reassign.val)].push(watchers[i]);
                     watchers.swap_remove(i);
                 } else {
                     i += 1;
@@ -143,7 +143,7 @@ impl Solver {
             }
             std::mem::swap(
                 &mut watchers,
-                &mut self.vars[var].watchers[usize::from(pos)],
+                &mut self.vars[var].watchers[usize::from(val)],
             );
         }
         Ok(())
@@ -157,7 +157,7 @@ impl Solver {
             if var == assumption {
                 return Lit {
                     var: assumption,
-                    pos: ret.unwrap(),
+                    val: ret.unwrap(),
                 };
             }
         }
@@ -170,8 +170,8 @@ impl Solver {
                         return Err(Unsat);
                     }
                     let mut lit = self.undo_assumption();
-                    if !lit.pos {
-                        lit.pos = true;
+                    if !lit.val {
+                        lit.val = true;
                         self.enqueue_unchecked(lit);
                         break;
                     }
@@ -180,7 +180,7 @@ impl Solver {
                 let mut solved = true;
                 for (v, var) in self.vars.iter_mut().enumerate() {
                     if var.value.is_none() {
-                        self.enqueue_unchecked(Lit { var: v, pos: false });
+                        self.enqueue_unchecked(Lit { var: v, val: false });
                         self.assumption_history.push(v);
                         solved = false;
                         break;
@@ -218,7 +218,7 @@ fn main() {
         for x in parser.take_formula().iter().map(|x| x.to_vec()) {
             s.add_clause(x.iter().map(|x| Lit {
                 var: x.var().index(),
-                pos: x.is_positive(),
+                val: x.is_positive(),
             }))
             .unwrap();
         }
