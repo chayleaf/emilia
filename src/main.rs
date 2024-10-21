@@ -1,8 +1,9 @@
-use std::{collections::VecDeque, env, fmt, fs::File, io::Read, ops::Not};
+use std::{collections::BTreeSet, env, fmt, fs::File, io::Read, ops::Not};
 
 #[derive(Debug, Default)]
 struct VarInfo {
-    value: Option<bool>,
+    // (value, clause, assumption)
+    value: Option<(bool, Option<usize>, usize)>,
     watchers: [Vec<usize>; 2],
 }
 
@@ -40,13 +41,20 @@ impl Not for Lit {
 struct Solver {
     vars: Vec<VarInfo>,
     clauses: Vec<Vec<Lit>>,
-    prop_q: VecDeque<usize>,
+    base_clauses: usize,
+    prop_q: usize,
+    // history of vars
     history: Vec<usize>,
+    // assumption history of vars
     assumption_history: Vec<usize>,
+    solving: bool,
 }
 
 #[derive(Debug)]
-struct Unsat;
+struct Unsat {
+    learnt: Vec<Lit>,
+    max_assumption: usize,
+}
 
 impl Solver {
     pub fn add_var(&mut self) -> Var {
@@ -54,8 +62,27 @@ impl Solver {
         self.vars.push(VarInfo::default());
         ret
     }
-    fn add_clause(&mut self, clause: impl IntoIterator<Item = Lit>) -> Result<(), Unsat> {
-        let mut clause: Vec<_> = clause
+    fn remove_clause(&mut self, i: usize) {
+        let clause = self.clauses.swap_remove(i);
+        for lit in [clause[0], clause[1]] {
+            let watchers = &mut self.vars[lit.var].watchers[usize::from(!lit.val)];
+            for (i, x) in watchers.iter().copied().enumerate() {
+                if x == self.clauses.len() {
+                    watchers.swap_remove(i);
+                    break;
+                }
+            }
+        }
+        if i < self.base_clauses {
+            self.base_clauses -= 1;
+        }
+    }
+    fn add_clause(
+        &mut self,
+        clause: impl IntoIterator<Item = Lit>,
+    ) -> Result<Option<usize>, Unsat> {
+        let learned = self.solving;
+        let mut clause: BTreeSet<_> = clause
             .into_iter()
             .map(|x| {
                 while x.var >= self.vars.len() {
@@ -65,28 +92,34 @@ impl Solver {
             })
             .collect();
         if clause.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
-        clause.sort();
         if clause.len() == 1 {
-            let lit = clause[0];
-            return self.enqueue(lit);
+            let lit = clause.pop_first().unwrap();
+            self.enqueue(lit, None)?;
+            return Ok(None);
         }
+        let clause: Vec<_> = clause.into_iter().collect();
         for ab in clause.windows(2) {
             if ab[0] == !ab[1] {
-                return Ok(());
+                return Ok(None);
             }
         }
         self.vars[clause[0].var].watchers[usize::from(!clause[0].val)].push(self.clauses.len());
         self.vars[clause[1].var].watchers[usize::from(!clause[1].val)].push(self.clauses.len());
         self.clauses.push(clause);
-        Ok(())
+        if !learned {
+            self.base_clauses = self.clauses.len();
+        } else {
+            self.prune();
+        }
+        Ok(Some(self.clauses.len() - 1))
     }
     fn val(&self, lit: Lit) -> Option<bool> {
-        self.vars[lit.var].value.map(|x| x == lit.val)
+        self.vars[lit.var].value.map(|x| x.0 == lit.val)
     }
     fn visit(&mut self, clause: usize, from: Lit) -> Result<Option<Lit>, Unsat> {
-        let val = |lit: Lit| self.vars[lit.var].value.map(|x| x == lit.val);
+        let val = |lit: Lit| self.vars[lit.var].value.map(|x| x.0 == lit.val);
         let c = &mut self.clauses[clause];
         if !c[0] == from {
             c.swap(0, 1);
@@ -101,27 +134,106 @@ impl Solver {
             }
         }
         let lit = c[0];
-        self.enqueue(lit).map(|_| None)
+        self.enqueue(lit, Some(clause)).map(|_| None)
     }
-    fn enqueue(&mut self, lit: Lit) -> Result<(), Unsat> {
+    fn prune(&mut self) {
+        let prune_threshold = self.base_clauses;
+        let prune_target = self.base_clauses / 2;
+        if self.clauses.len() - self.base_clauses > prune_threshold {
+            // this is stable sort, so preserve newer clauses i guess
+            self.clauses[self.base_clauses..].reverse();
+            self.clauses[self.base_clauses..].sort_by_key(|clause| clause.len());
+            while self.clauses.len() - self.base_clauses > prune_target {
+                self.remove_clause(self.base_clauses + prune_target);
+            }
+            self.clauses[self.base_clauses..].reverse();
+        }
+    }
+    fn enqueue(&mut self, lit: Lit, cause: Option<usize>) -> Result<(), Unsat> {
         match self.val(lit) {
             Some(true) => Ok(()),
-            Some(false) => Err(Unsat),
+            Some(false) => {
+                if let Some(mut cause) = cause {
+                    let mut learnt = vec![Lit { var: 0, val: false }];
+                    let mut seen = BTreeSet::new();
+                    let mut max_assumption = 0;
+                    let mut counter = 1i32;
+                    let mut p = lit.var;
+                    let mut first = true;
+                    let mut hist = self.history.iter().copied().rev();
+                    while counter > 0 {
+                        let c = &self.clauses[cause];
+                        for q in c.iter().skip(if first {
+                            counter -= 1;
+                            0
+                        } else {
+                            first = false;
+                            1
+                        }) {
+                            if !seen.insert(q.var) {
+                                continue;
+                            }
+                            let (_, _, assumption_index) = self.vars[q.var].value.unwrap();
+                            {
+                                if assumption_index == self.assumption_history.len() {
+                                    counter += 1;
+                                } else if assumption_index > 0 {
+                                    learnt.push(*q);
+                                    max_assumption = max_assumption.max(assumption_index);
+                                }
+                            }
+                        }
+                        p = hist.next().unwrap();
+                        let mut cause1 = self.vars[p].value.unwrap().1;
+                        // next literal to look at
+                        while !seen.contains(&p) {
+                            p = hist.next().unwrap();
+                            cause1 = self.vars[p].value.unwrap().1;
+                        }
+                        counter -= 1;
+                        if counter <= 0 {
+                            break;
+                        }
+                        cause = cause1.unwrap();
+                    }
+                    learnt[0] = Lit {
+                        var: p,
+                        val: !self.vars[p].value.unwrap().0,
+                    };
+
+                    Err(Unsat {
+                        learnt,
+                        max_assumption,
+                    })
+                } else {
+                    Err(Unsat {
+                        learnt: vec![],
+                        max_assumption: 0,
+                    })
+                }
+            }
             None => {
-                self.enqueue_unchecked(lit);
+                self.enqueue_unchecked(lit, cause);
                 Ok(())
             }
         }
     }
-    fn enqueue_unchecked(&mut self, lit: Lit) {
+    fn enqueue_unchecked(&mut self, lit: Lit, cause: Option<usize>) {
+        println!(
+            "pre vals {lit:?} {:?}",
+            self.vars.iter().map(|x| x.value).collect::<Vec<_>>()
+        );
         debug_assert!(self.val(lit).is_none());
-        self.vars[lit.var].value = Some(lit.val);
-        self.prop_q.push_back(lit.var);
+        self.vars[lit.var].value = Some((lit.val, cause, self.assumption_history.len()));
         self.history.push(lit.var);
     }
     fn propagate(&mut self) -> Result<(), Unsat> {
-        while let Some(var) = self.prop_q.pop_front() {
-            let val = self.vars[var].value.unwrap();
+        println!("q {:?}", self.prop_q);
+        while self.prop_q < self.history.len() {
+            println!("prop {:?}", self.prop_q);
+            let var = self.history[self.prop_q];
+            self.prop_q += 1;
+            let val = self.vars[var].value.unwrap().0;
             let mut watchers = Vec::new();
             std::mem::swap(
                 &mut watchers,
@@ -131,7 +243,7 @@ impl Solver {
             while i < watchers.len() {
                 if let Some(reassign) =
                     self.visit(watchers[i], Lit { var, val }).map_err(|err| {
-                        self.prop_q.clear();
+                        self.prop_q = self.history.len();
                         err
                     })?
                 {
@@ -150,44 +262,50 @@ impl Solver {
     }
     fn undo_assumption(&mut self) -> Lit {
         let assumption = self.assumption_history.pop().unwrap();
-        let mut ret;
         loop {
             let var = self.history.pop().unwrap();
-            ret = self.vars[var].value.take();
+            let val = self.vars[var].value.take().map(|x| x.0);
             if var == assumption {
+                self.prop_q = self.history.len();
                 return Lit {
                     var: assumption,
-                    val: ret.unwrap(),
+                    val: val.unwrap(),
                 };
             }
         }
     }
-    fn solve(&mut self) -> Result<Vec<bool>, Unsat> {
+    fn solve(mut self) -> Result<Vec<bool>, Unsat> {
+        self.solving = true;
         loop {
-            if self.propagate().is_err() {
-                loop {
-                    if self.assumption_history.is_empty() {
-                        return Err(Unsat);
-                    }
-                    let mut lit = self.undo_assumption();
-                    if !lit.val {
-                        lit.val = true;
-                        self.enqueue_unchecked(lit);
-                        break;
-                    }
+            if let Err(err) = self.propagate() {
+                if err.learnt.is_empty() || self.assumption_history.is_empty() {
+                    return Err(err);
                 }
+                while self.assumption_history.len() > err.max_assumption {
+                    self.undo_assumption();
+                }
+                let clause = (err.learnt.len() > 1)
+                    .then(|| self.add_clause(err.learnt.iter().copied()).unwrap())
+                    .flatten();
+                println!("adding {:?}", err.learnt);
+                self.enqueue_unchecked(*err.learnt.first().unwrap(), clause);
             } else {
                 let mut solved = true;
                 for (v, var) in self.vars.iter_mut().enumerate() {
                     if var.value.is_none() {
-                        self.enqueue_unchecked(Lit { var: v, val: false });
                         self.assumption_history.push(v);
+                        println!("q");
+                        self.enqueue_unchecked(Lit { var: v, val: false }, None);
                         solved = false;
                         break;
                     }
                 }
                 if solved {
-                    return Ok(self.vars.iter().map(|x| x.value.unwrap_or(false)).collect());
+                    return Ok(self
+                        .vars
+                        .iter()
+                        .map(|x| x.value.map(|x| x.0).unwrap_or(false))
+                        .collect());
                 }
             }
         }
