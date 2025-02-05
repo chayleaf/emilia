@@ -219,18 +219,12 @@ impl Solver {
         }
     }
     fn enqueue_unchecked(&mut self, lit: Lit, cause: Option<usize>) {
-        println!(
-            "pre vals {lit:?} {:?}",
-            self.vars.iter().map(|x| x.value).collect::<Vec<_>>()
-        );
         debug_assert!(self.val(lit).is_none());
         self.vars[lit.var].value = Some((lit.val, cause, self.assumption_history.len()));
         self.history.push(lit.var);
     }
     fn propagate(&mut self) -> Result<(), Unsat> {
-        println!("q {:?}", self.prop_q);
         while self.prop_q < self.history.len() {
-            println!("prop {:?}", self.prop_q);
             let var = self.history[self.prop_q];
             self.prop_q += 1;
             let val = self.vars[var].value.unwrap().0;
@@ -287,14 +281,12 @@ impl Solver {
                 let clause = (err.learnt.len() > 1)
                     .then(|| self.add_clause(err.learnt.iter().copied()).unwrap())
                     .flatten();
-                println!("adding {:?}", err.learnt);
                 self.enqueue_unchecked(*err.learnt.first().unwrap(), clause);
             } else {
                 let mut solved = true;
                 for (v, var) in self.vars.iter_mut().enumerate() {
                     if var.value.is_none() {
                         self.assumption_history.push(v);
-                        println!("q");
                         self.enqueue_unchecked(Lit { var: v, val: false }, None);
                         solved = false;
                         break;
