@@ -165,9 +165,9 @@ impl Solver {
                         let c = &self.clauses[cause];
                         for q in c.iter().skip(if first {
                             counter -= 1;
+                            first = false;
                             0
                         } else {
-                            first = false;
                             1
                         }) {
                             if !seen.insert(q.var) {
