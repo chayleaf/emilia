@@ -84,11 +84,10 @@ impl Solver {
         let learned = self.solving;
         let mut clause: BTreeSet<_> = clause
             .into_iter()
-            .map(|x| {
+            .inspect(|x| {
                 while x.var >= self.vars.len() {
                     self.add_var();
                 }
-                x
             })
             .collect();
         if clause.is_empty() {
@@ -111,7 +110,7 @@ impl Solver {
         if !learned {
             self.base_clauses = self.clauses.len();
         } else {
-            self.prune();
+            //self.prune();
         }
         Ok(Some(self.clauses.len() - 1))
     }
@@ -236,9 +235,12 @@ impl Solver {
             let mut i = 0;
             while i < watchers.len() {
                 if let Some(reassign) =
-                    self.visit(watchers[i], Lit { var, val }).map_err(|err| {
+                    self.visit(watchers[i], Lit { var, val }).inspect_err(|_| {
                         self.prop_q = self.history.len();
-                        err
+                        std::mem::swap(
+                            &mut watchers,
+                            &mut self.vars[var].watchers[usize::from(val)],
+                        );
                     })?
                 {
                     self.vars[reassign.var].watchers[usize::from(reassign.val)].push(watchers[i]);
